@@ -2,7 +2,6 @@ package main
 
 import (
 	"container/list"
-	"context"
 	"flag"
 	"log"
 	"net/http"
@@ -131,23 +130,23 @@ func getFromQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, _ := context.WithTimeout(r.Context(), timeout*time.Second)
-
 	waitCh := make(chan struct{})
 	go func() {
 		q.cond.Wait() // ждем изменений в очереди и отправляем сигнал в канал, что бы в селекте сработал нужный блок
-		if ctx.Err() != nil {
-			// самый сложный кусок кода
-			// переменные условия срабатывают по порядку как начинали ждать.
-			// проверяем был ли закрыт контекс
-			// и если был, значит зто уже не нужная горутина и мы сигнализируем следуюей горутине которая ждет
-			q.cond.Signal()
-			q.cond.L.Unlock()
-			close(waitCh)
-			return
-		}
 
-		waitCh <- struct{}{}
+		select {
+		case _, ok := <-waitCh:
+			if !ok {
+				// самый сложный кусок кода))
+				// переменные условия срабатывают по порядку как начинали ждать.
+				// если канал waitCh закрыт, то значит сработал таймаут.
+				// значит зто уже не нужная горутина и мы сигнализируем следуюей горутине которая ждет
+				q.cond.Signal()
+				q.cond.L.Unlock()
+			}
+		default:
+			waitCh <- struct{}{}
+		}
 	}()
 
 	select {
@@ -159,7 +158,8 @@ func getFromQueue(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(value))
 		return
-	case <-ctx.Done():
+	case <-time.After(timeout * time.Second):
+		close(waitCh)
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
